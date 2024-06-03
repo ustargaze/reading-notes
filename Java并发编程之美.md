@@ -211,5 +211,85 @@ Java中的线程中断是一种线程间的协作模式，通过设置线程的�
 
 
 
+## 第二部分 Java 并发编程高级篇
+
+### 第 3 章 Java 并发包中 ThreadLocalRandom 原理剖析
+
+**Random 类及其局限性**
+
+> Math.random 使用的也是 Random 类。
+
+使用 Random 生成随机数的需要种子，种子可以通过构造函数指定，如果不指定则会自动生成一个。
+
+Random 生成随机数主要是两个步骤：
+
+1. 根据老的种子来生成新的种子。
+2. 根据新的种子来计算新的随机数。
+
+在多线程场景下可能发生的问题：
+
+1. 构造的多个 Random 实例，在未指定种子的情况下，内部生成的默认种子相同。
+2. 使用同一个 Random 类，可能导致多个线程产生的新的种子是一样的。
+
+对于问题 1，在 JDK 中使用如下代码解决：
+
+```java
+public Random() {
+    this(seedUniquifier() ^ System.nanoTime());
+}
+
+private static long seedUniquifier() {
+    // L'Ecuyer, "Tables of Linear Congruential Generators of
+    // Different Sizes and Good Lattice Structure", 1999
+    for (;;) {
+        long current = seedUniquifier.get();
+        long next = current * 181783497276652981L;
+        if (seedUniquifier.compareAndSet(current, next))
+            return next;
+    }
+}
+```
+
+对于问题 2，使用如下代码解决：
+
+```java
+protected int next(int bits) {
+    long oldseed, nextseed;
+    AtomicLong seed = this.seed;
+    do {
+        oldseed = seed.get();
+        nextseed = (oldseed * multiplier + addend) & mask;
+    } while (!seed.compareAndSet(oldseed, nextseed));
+    return (int)(nextseed >>> (48 - bits));
+}
+```
+
+总结来说就是通过 CAS + 自旋操作来保证多线程下随机数的随机性。但是这样当多个线程竞争同一个原子变量的更新操作，由于 CAS 只有一个线程会成功，会出现大量的自旋重试，这会降低并发性能。
+
+**ThreadLocalRandom**
+
+ThreadLocalRandom 为了避免多个线程对同一个原子变量的竞争操作，使用的是每个线程维护一个自己的种子变量的方式。
+
+ThreadLocalRandom 是 <u>Random 的子类并且是一个饿汉式单例类</u>，通过 current 可以获取到实例对象。在初次调用 current 时会判断种子是否初始化，如果没有则会进行初始化。相关代码如下：
+
+```java
+static final void localInit() {
+    int p = probeGenerator.addAndGet(PROBE_INCREMENT);
+    int probe = (p == 0) ? 1 : p; // skip 0
+    long seed = mix64(seeder.getAndAdd(SEEDER_INCREMENT));
+    Thread t = Thread.currentThread();
+    UNSAFE.putLong(t, SEED, seed);
+    UNSAFE.putInt(t, PROBE, probe);
+}
+
+public static ThreadLocalRandom current() {
+    if (UNSAFE.getInt(Thread.currentThread(), PROBE) == 0)
+        localInit();
+    return instance;
+}
+```
+
+probeGenerator 和 seeder 是两个原子变量，用来为每个线程生成 threadLocalRandomProbe 和 threadLocalRandomSeed 这两个属性的值。这样对于原子变量更新的竞争只会出现在线程第一次调用 current 获取实例时，后续生成随机数并不会发生。
+
 
 
