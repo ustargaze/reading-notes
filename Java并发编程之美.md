@@ -291,5 +291,113 @@ public static ThreadLocalRandom current() {
 
 probeGenerator 和 seeder 是两个原子变量，用来为每个线程生成 threadLocalRandomProbe 和 threadLocalRandomSeed 这两个属性的值。这样对于原子变量更新的竞争只会出现在线程第一次调用 current 获取实例时，后续生成随机数并不会发生。
 
+### 第 4 章 Java 并发包中原子操作类原理剖析
 
+JUC 并发包中包含的 AtomicInteger、AtomicLong 和 AtomicBoolean 等原子性操作类，它们的原理类似，其内部使用Unsafe来实现（CAS + 自旋（看具体操作））。
 
+这类原子类，通过 CAS 提供了非阻塞的原子性操作，但是在高并发下大量线程会同时去竞争更新同一个原子变量，因为同时只能有一个线程操作成功，这会造成了大量线程竞争失败而通过无限循环进行自旋，这会浪费 CPU 资源。
+
+为了解决这个问题，提高性能，LongAdder 内部会有一个变量 cells （类型为 Cell 数组）用来将更新操作分散到多个 cell 上。当线程执行操作时，会随机找一个 cell 进行操作，如果发生冲突会继续寻找下一个没有冲突的 cell 进行操作或者扩容 cells 数组。
+
+### 第 5 章 Java 并发包中并发 List 源码剖析
+
+CopyOnWriteArrayList 是一个线程安全的 List，内部通过 ReentrantLock 来保证同时只有一个线程对 array 变量进行修改，并且对 array 进行修改时会使用写时复制的策略，保证其他线程的读取是安全的，适用于读多写少的场景。
+
+### 第 6 章 Java 并发包中锁原理剖析
+
+**抽象同步队列 AQS**
+
+AbstractQueuedSynchronizer 抽象同步队列简称 AQS，它是实现同步器的基础组件，并发包中锁的底层就是使用 AQS 实现的。
+
+AQS 类图如下：
+
+```mermaid
+classDiagram
+AbstractOwnableSynchronizer <|-- AbstractQueuedSynchronizer
+AbstractQueuedSynchronizer --> Node
+Node --> Node
+ConditionObject --> AbstractQueuedSynchronizer
+ConditionObject --> Node
+class AbstractOwnableSynchronizer {
+  <<abstract>>
+  - exclusiveOwnerThread: Thread
+  # setExclusiveOwnerThread(thread: Thread) void
+  # getExclusiveOwnerThread() Thread
+}
+class AbstractQueuedSynchronizer {
+  <<abstract>>
+  - state int
+  - head Node
+  - tail Node
+  # acquire(arg: int) void
+  # tryAcquire(arg: int) boolean
+  # acquireShared(arg: int) void
+  # release(arg: int) boolean
+  # releaseShared(arg: int) boolean
+  # tryRelease(arg: int) boolean
+  # tryReleaseShared(arg: int) boolean
+}
+class Node {
+  SHARED Node$
+  EXCLUSIVE Node$
+  CANCELLED int$
+  SIGNAL int$
+  CONDITION int$
+  PROPAGATE int$
+  # waitStatus int
+  # prev Node
+  # next Node
+  # thread Thread
+  # nextWaiter Node
+  # isShared() boolean
+  # predecessor() Node
+}
+class ConditionObject {
+  - firstWaiter Node
+  - lastWaiter Node
+  + signal() void
+  + signalAll() void
+  + await() void
+}
+```
+
+AQS 是一个 FIFO 的双向队列，在内部通过 head 和 tail 记录队首和队尾元素，队列元素类型为 Node。state 用来表示 AQS 的状态，在不同的实现中有不同的含义。通过 exclusiveOwnerThread 变量来记录持有锁的线程，来实现线程互斥和重入。
+
+在 Node 中通过 thread 变量来存放进入 AQS 队列里面的线程，Node 节点内部的 SHARED 用来标记该线程是获取共享资源时被阻塞挂起后放入 AQS 对立的，EXCLUSIVE 用来标记线程是获取独占资源时被挂起后放入 AQS 队列的；waitStatus 记录当前线程等待状态，可以为 CANCELLED（当前线程被取消了）、SIGNAL（后继线程需要被唤醒）、CONDITION（表示线程正在 Condition 中等待）、PROPAGATE（释放共享资源时需要通知其他节点），prev 记录当前节点在 AQS 中的前驱，next 记录当前节点在 AQS 中的后继，nextWaiter 用于记录在 ConditionObject 链表中当前元素的后继。
+
+ConditionObject 也通过 Node 实现了一个单向链表，firstWaiter 指向队首，lastWaiter 指向队尾，通过 Node 中的 nextWaiter 用于记录当前元素的后继。通过调用 await 方法会将当前线程加入队列，调用 signal 将队首元素或者调用 signalAll 将所有元素加入到 AQS 队列中。
+
+加入 AQS 队列的线程首先是处于运行状态，而在 AQS 中只有队首元素会尝试获取 state，如果获取失败或者非队首元素都会将前一个节点的状态置为 SIGNAL 然后调用 LockSupport.park 阻塞当前线程。当线程释放 state 时，会唤醒 head 节点指向的后继节点。
+
+**独占锁 ReentrantLock**
+
+ReentrantLock 是一个可重入的独占锁，同时只有一个线程可以获取锁，其他获取锁的线程会被阻塞而放入该锁的 AQS 队列中。
+
+ReentrantLock 内部通过继承 AQS 实现了一个 Sync 类，其有 NonfairSync 和 FairSync 两个子类分别实现非公平锁和公平锁。
+
+在这里 AQS 中的 state 用来表示线程获取锁的重入次数，默认情况下，state 值为 0 表示当前锁没有被任何线程持有。当线程获取锁或者重入时都是将 state 加 1，当线程释放锁时对 state 减 1，当 state 为 0 后表示当前线程释放了该锁。内部通过 AQS 的 exclusiveOwnerThread 变量记录获取锁的线程。
+
+获取锁：
+
+1. lock() 方法，获取锁，如果获取成功会将 state 加 1，获取失败则会加入 AQS 等待队列中然后阻塞。
+2. lockInterruptibly() 方法，和 lock() 方法不同在于，如果线程中断标志为 true 会抛出 InterruptedException 异常。
+3. tryLock() 方法，尝试获取锁，使用的是非公平获取，如果索取到锁返回 true，否则返回 false，该方法不会引起当前线程阻塞。
+4. tryLock(long timeout, TimeUnit unit) 方法，与 tryLock 不同在于设置了超时时间，如果超时时间到没有获取到锁则返回 false。在具体实现中如果第一次获取锁失败之后会加入 AQS 队列等待，利用 LockSupport.parkNanos 阻塞指定时间后还没有获取到锁，会将等待状态设置为取消，然后从等待队列中移除。
+
+释放锁：
+
+1. unlock() 方法，如果当前线程持有锁，调用该方法会让 AQS state 减 1，如果减 1 之后 state 为 0，会释放锁（将 exclusiveOwnerThread 设置为 null，并唤醒等待队列中第一个线程）。
+
+**读写锁 ReentrantReadWriteLock**
+
+ReentrantLock 是独占锁，某时只有一个线程可以获取该锁，而实际中会有写少读多的场景，显然 ReentrantLock 满足不了这个需求，所以 ReentrantReadWriteLock 应运而生。ReentrantReadWriteLock 采用读写分离的策略，允许多个线程可以同时获取读锁。
+
+ReentrantReadWriteLock 内部 ReadLock 和 WriteLock 两种锁，共用一个 Sync 实例。Sync 是 AQS 的子类，通过 state 的高 16 位表示获取读锁的次数，使用低 16 位表示写锁的重入次数。因此读写锁的获取次数最多为 2^16，超过这个数量会报错。
+
+ReentrantReadWriteLock 的加锁和释放锁的过程与 ReentrantLock 有些类似，只不过 ReentrantReadWriteLock 中的读锁是共享锁，写锁是独占锁。
+
+**StampedLock**
+
+StampedLock 提供的读写锁与 ReentrantReadWriteLock 类似，只是前者提供的是不可重入锁。但是前者通过提供乐观读锁在多线程多读的情况下提供了更好的性能，这是因为获取乐观读锁时不需要进行CAS操作设置锁的状态，而只是简单地测试状态。
+
+StampedLock 不是基于 AQS 实现的。
