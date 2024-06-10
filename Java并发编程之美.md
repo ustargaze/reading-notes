@@ -401,3 +401,70 @@ ReentrantReadWriteLock 的加锁和释放锁的过程与 ReentrantLock 有些类
 StampedLock 提供的读写锁与 ReentrantReadWriteLock 类似，只是前者提供的是不可重入锁。但是前者通过提供乐观读锁在多线程多读的情况下提供了更好的性能，这是因为获取乐观读锁时不需要进行CAS操作设置锁的状态，而只是简单地测试状态。
 
 StampedLock 不是基于 AQS 实现的。
+
+### 第 7 章 Java 并发包中的并发队列原理剖析
+
+略
+
+### 第 8 章 Java 并发包中线程池 ThreadPoolExecutor 原理探究
+
+线程池主要解决两个问题：
+
+1. 执行大量异步任务时提供较好的性能。线程池中的线程是可复用的，不需要每次执行异步任务时都重新创建和销毁线程。
+2. 提供资源限制和管理的手段，比如限制线程的个数，动态增加线程等。
+
+**要点：**
+
+1. 使用 AtomicInteger 的高 3 位用来表示线程池状态，后 29 位用来记录线程池线程个数。
+
+2. 线程池状态：
+
+   1. running：接受新任务并处理阻塞队列里的任务。
+   2. shutdown：拒绝新任务但是处理阻塞队列里的任务。
+   3. stop：拒绝新任务并且抛弃队列里的任务，同时会中断正在处理的任务。
+   4. tidying：所有任务都执行玩（包含阻塞队列里面的任务）后当前线程池活动线程数为 0，将要调用 terminated 方法。
+   5. terminated：终止状态。terminated 方法调用完成以后的状态。
+
+   状态转换过程：
+
+   ```mermaid
+   stateDiagram
+       [*] --> running
+       running --> shutdown: 调用 shutdown()
+       shutdown --> stop: 调用 shutdownNow()
+       running --> stop: 调用 shutdownNow()
+       shutdown --> tidying: 线程池和任务队列都为空
+       stop --> tidying: 线程池为空
+       tidying --> terminated: terminated() 执行完成
+       terminated --> [*]
+   ```
+
+3. 线程池参数：
+
+   1. corePoolSize：核心线程数
+   2. maximunPoolSize：最大线程数
+   3. keepAliveTime：非核心线程数空闲时的最大存活时间
+   4. unit：存活时间的时间单位
+   5. workQueue：任务队列
+   6. threadFactory：线程工厂
+   7. handler：拒绝策略（AbortPolicy（抛出异常）、CallerRunsPolicy（使用调用者所在线程来运行任务）、DiscardOldestPolicy（调用poll丢弃一个任务，执行当前任务）及 DiscardPolicy）
+
+常见的线程池类型：
+
+-  FixedThreadPool ：核心线程线程数等于最大线程数（由参数指定），阻塞队列长度为 Integer.MAX_VALUE。
+- SingleThreadExecutor：核心线程线程数等于最大线程数且为 1，阻塞队列长度为 Integer.MAX_VALUE。
+- CachedThreadPool：核心线程数为 0，最大线程数为  Integer.MAX_VALUE，keeyAliveTime = 60s，阻塞队列为同步队列长度为 1。
+
+**线程池任务提交流程：**
+
+```mermaid
+flowchart LR
+    A[提交任务] --> B{核心线程数\n是否达到?}
+    B -- No --> C[创建核心线程]
+    B -- Yes --> D{等待队列\n是否已满?}
+    D -- No --> E[任务加入队列]
+    D -- Yes --> F{最大线程数\n是否达到?}
+    F -- No ----> G[创建非核心线程]
+    F -- Yes ----> H[执行拒绝策略]
+```
+
