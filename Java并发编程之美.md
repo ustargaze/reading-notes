@@ -14,7 +14,7 @@
 
 🤔 翻了一下[操作系统](https://weread.qq.com/web/reader/81d32df05a5d7d81deef204?)这本书，调度不仅仅只有 CPU 调度，我之前的理解应该有误，比如针对使用者占用不同资源的调度可以分为：高级调度、中级调度、低级调度，并且作业、进程、线程在不同的时期有不同的含义，尽管如此还是觉得说进程是调度的基本单位这种表述有些模糊。
 
-目前暂时没办法清楚的说出各种调度的区别，还需要加强操作系统相关概念的学习，这里先暂留个疑问。😐 目前先认为<u>进程是代码在数据集合上的一次运行活动，是系统进行资源分配的基本单位，线程则是进程的一个执行路径，是CPU分配的基本单位，一个进程中至少有一个线程，进程中的多个线程共享进程的资源。</u>
+目前对各种调度的区别不够熟悉，还需要加强操作系统相关概念的学习，这里先暂留个疑问。😐 目前先认为<u>进程是代码在数据集合上的一次运行活动，是系统进行资源分配的基本单位，线程则是进程的一个执行路径，是CPU分配的基本单位，一个进程中至少有一个线程，进程中的多个线程共享进程的资源。</u>
 
 
 
@@ -467,4 +467,78 @@ flowchart LR
     F -- No ----> G[创建非核心线程]
     F -- Yes ----> H[执行拒绝策略]
 ```
+
+### 第 9 章 Java 并发包中 ScheduledThreadPoolExecutor 原理探究
+
+ScheduledThreadPoolExecutor 是一个可以在指定一定延迟时间后或者定时进行任务调度执行的线程池。
+
+ScheduledFutureTask 内部还有一个变量 period 用来表示任务的类型，任务类型如下：
+
+- period = 0，说明当前任务是一次性的，执行完毕后就退出了。
+- period 为负数，说明当前任务为 fixed-delay 任务，是固定延迟的定时可重复执行任务。
+- period 为正数，说明当前任务为 fixed-rate 任务，是固定频率的定时可重复执行任务。
+
+三个重要函数
+
+- schedule（Runnable command, long delay, TimeUnit unit）
+
+  提交一个延迟执行的任务，任务从提交时间开始延迟以 unit 为单位的 delay 时间后开始执行，提交的任务只会执行一次。
+
+- scheduleWithFixedDelay（Runnable command, long initialDelay, long delay, TimeUnit unit）
+
+  该方法的作用是，当任务执行完毕后，让其延迟固定时间后再次运行（fixed-delay任务）。
+
+- scheduleAtFixedRate（Runnable command, long initialDelay, long period, TimeUnit unit）
+
+  该方法相对起始时间点以固定频率调用指定的任务（fixed-rate任务）。当把任务提交到线程池并延迟 initialDelay 时间（时间单位为unit）后开始执行任务 command，然后每隔 period 时间就会执行一次。
+
+<u>需要注意的是，因为任务的下一次执行时间是任务执行完成之后设置的，对于 fixed-rate 任务如果当前任务还没有执行完，下一次要执行任务的时间到了，也不会并发执行，而是要等到当前任务执行完毕后再执行。</u>
+
+### 第 10 章 Java 并发包中线程同步器原理剖析
+
+**CountDownLatch**
+
+CountDownLatch 通过 AQS 实现的，利用 AQS 的 state 表示计数器的值。
+
+1. await 方法
+
+   调用 CountDownLatch 的 await 方法后，当前线程会被阻塞，直到下面情况发生才会返回：1. 通过调用 countDown 方法，使得 state 的值为 0；2. 其他线程调用了当前线程的 interrupt() 方法中断了当前线程，当前线程就会抛出 Interrupted Exception 异常，然后返回。
+
+2. countDown 方法
+
+   调用该方法，递减 state 的值，递减后如果 state 为 0 则唤醒所有因为调用 await 方法而阻塞的线程，否则什么也不做。
+
+> 注意 CountDownLatch 只能使用一次，不能循环使用。
+
+**CyclicBarrier**
+
+CyclicBarrier 让一组线程全部达到一个状态后再全部同时执行，CyclicBarrier 是可以重复使用的。CyclicBarrier 是基于 ReentrantLock 实现的。
+
+为了保证可以重复使用，维护了 parties 和 count 两个变量，parties 表示线程个数，count 一开始等于 parties，每当线程调用 await 方法就递减 1，当 count 为 0 时就表示所有线程都到了屏障点。
+
+await 方法
+
+调用 await 方法的线程会被阻塞，直到满足以下条件之一：1. parties 个线程都调用了 await 方法；2. 其他线程调用了当前线程的 interrupt 方法中断了当前线程，当前线程会抛出 Interrupted Exception 异常而返回；3. 与当前屏障点关联的 Generation 对象的 broken 标志被设置为 true 时，会抛出 BrokenBarrierException 异常，然后返回。
+
+在 await 方法中通过 ReentrantLock 实现对 count 对互斥修改，当 count 不为 0 时会调用 Condition 的 await 方法进行阻塞，当 count 等于 0 时，会重置 count 为 parties，并唤醒所有的等待线程。
+
+**Semaphore**
+
+Semaphore 信号量也是 Java 中的一个同步器，也是利用 AQS 的 state 实现计数器。
+
+1. acquire()
+
+   调用该方法的目的是希望获取一个信号量资源，如果信号量数量为 0，则当前线程会被放入 AQS 的阻塞队列中。
+
+2. acquire(int permits)
+
+   该方法与 acquire() 的区别在于，该方法需要获取 permits 个信号量。
+
+3. release()
+
+   释放一个信号量，然后根据公平策略唤醒阻塞队列中第一个线程，被唤醒的线程会尝试获取信号量。
+
+4. release(int permits)
+
+   释放 permits 个信号量。
 
